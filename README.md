@@ -187,6 +187,41 @@ runs a hello-world model through the tools and checks the physics against the
 analytic answer. Model-building idioms and known COMSOL API traps live in
 `references/`.
 
+### Giving another Claude (or any MCP client) access
+
+Prerequisites on whichever machine runs the server: `npm install` in this repo,
+and a working CLI setup (`cluster setup` + `cluster login`) — the server reuses
+that config and those Keychain secrets.
+
+**Claude Code, working in this repo** — nothing to do. `.mcp.json` registers the
+server for the project; approve it when Claude Code asks on first use. The
+`comsol-autopilot` skill in `.claude/skills/` loads the same way, so the agent
+already knows the plan → sanity-gate → produce → deliver workflow.
+
+**Claude Code, from anywhere on that machine** — register it once for your user:
+
+```sh
+claude mcp add clt --scope user -- node /absolute/path/to/clt/mcp/server.mjs
+claude mcp list          # confirm it connects
+```
+
+**Any other MCP client** (Claude Desktop, an SDK agent, another tool) — point it
+at the stdio server with absolute paths:
+
+```json
+{ "mcpServers": { "clt": { "command": "node",
+                           "args": ["/absolute/path/to/clt/mcp/server.mjs"] } } }
+```
+
+Then just describe the physics. A cold-start prompt that works:
+
+> Use the clt tools to find the first 10 eigenfrequencies of a 20 cm steel cube,
+> verify them against theory, and chart the result.
+
+Agents that can't see `references/` (a non–Claude Code client, say) should be
+told to read `references/CONVENTIONS.md` first — that file is what keeps
+generated models from tripping the known COMSOL API traps.
+
 ## Forking for lab members
 
 The repo contains **zero** personal data: config lives in `~/.config/clt/`,
@@ -220,6 +255,10 @@ exports, or result CSVs.
 - Storing the TOTP seed next to the password on the same Mac collapses 2FA to
   "possession of your unlocked Mac". That protects against remote credential
   theft, but not against someone at your keyboard. Keep FileVault on.
+- The MCP server does **not** gate on Touch ID: an approved MCP client can submit
+  cluster jobs without a per-action prompt. That is the point of it, but it means
+  MCP access to this repo is equivalent to cluster access. Guardrails bound the
+  damage (concurrency, CPU/memory/time caps, partition allowlist), not the intent.
 - The Touch ID gate is a convenience lock on *this script*, not encryption —
   secrets are guarded by the Keychain. To force a macOS confirmation dialog on
   every secret read, recreate the items with no trusted app:
