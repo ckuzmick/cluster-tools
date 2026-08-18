@@ -457,8 +457,22 @@ async function status(cfg, jobid) {
     if (state !== 'RUNNING') continue;
     const job = jobs.find((j) => j.id === id);
     if (!job) continue;
-    const pct = Number(run('ssh', [cfg.clusterHost,
-      `grep -o "Current Progress: *[0-9]*" ${job.dir}/batch.log 2>/dev/null | tail -1 | grep -o "[0-9]*$" || true`]).trim());
+    // One pass over the log: last stage %, whether the meter has ever restarted
+    // (i.e. it is per-stage, not whole-job), and how many solves have finished.
+    const probe = run('ssh', [cfg.clusterHost,
+      `awk '/Current Progress:/ { if (match($0, /Current Progress: *[0-9]+/)) { ` +
+      `p = substr($0, RSTART, RLENGTH); gsub(/[^0-9]/, "", p) + 0; ` +
+      `if (p + 0 < last - 20) reset = 1; last = p + 0 } } ` +
+      `/^-{3,}.*[Ss]olver.*in .*-{3,}>[ \\t]*$/ { solves++ } ` +
+      `END { print last + 0, reset + 0, solves + 0 }' ${job.dir}/batch.log 2>/dev/null || true`]).trim();
+    const [pct, reset, solves] = probe.split(/\s+/).map(Number);
+    if (!Number.isFinite(pct)) continue;
+    if (reset) {
+      // Sub-task meter: report the stage honestly instead of a bogus whole-job ETA.
+      console.log(`\x1b[2m  ${job.name}: stage ${pct}%  ·  ${solves} solve${solves === 1 ? '' : 's'} done`
+        + `  ·  no overall ETA (multi-stage; cluster watch --points N)\x1b[0m`);
+      continue;
+    }
     const eta = etaParts(pct, slurmSeconds(elapsed));
     if (eta) {
       console.log(`\x1b[2m  ${job.name}: ${pct}%  ·  ~${fmtDur(eta.remaining * 1000)} left  ·  done ~${eta.finish}\x1b[0m`);
@@ -506,7 +520,7 @@ function etaParts(pct, elapsedSec) {
   return { remaining, finish: easternFinish(Date.now() + remaining * 1000) };
 }
 
-async function watch(cfg, ref) {
+async function watch(cfg, ref, points) {
   const job = findJob(ref);
   await ensureMaster(cfg);
 
@@ -517,7 +531,14 @@ async function watch(cfg, ref) {
   }
 
   const MAX_LINES = 5000;
-  let percent = 0;
+  // COMSOL's "Current Progress: N %" is a SUB-TASK meter: it resets to 0 for every
+  // geometry build, mesh and solve. Treating the latest value as whole-job progress
+  // is wrong for anything multi-stage (a sweep resets it dozens of times). So:
+  // track resets, count completed solves, and only claim an overall figure when we
+  // legitimately have one — a single-meter job, or a known point count (--points N).
+  let percent = 0;          // progress within the current stage
+  let sawReset = false;     // proof the meter is per-stage, not overall
+  let solvesDone = 0;       // completed eigenvalue/stationary solver blocks
   let phase = 'starting…';
   let mem = '';
   let state = '…';
@@ -545,9 +566,13 @@ async function watch(cfg, ref) {
     for (const line of lines) {
       const prog = line.match(/Current Progress:\s*(\d+)\s*%\s*-?\s*(.*)/);
       if (prog) {
-        percent = Number(prog[1]);
+        const p = Number(prog[1]);
+        if (p < percent - 20) sawReset = true; // meter restarted: it is per-stage
+        percent = p;
         if (prog[2].trim()) phase = prog[2].trim();
       }
+      // Solver block footer, e.g. "----- Eigenvalue Solver 1 in Study/Solution 1 --->"
+      if (/^-{3,}\s+\S.*\bin\b.*-{3,}>\s*$/.test(line) && /Solver/i.test(line)) solvesDone++;
       const phys = line.match(/Physical memory:\s*([\d.]+\s*[GMK]B)/i);
       if (phys) mem = phys[1];
       const old = line.match(/^Memory:\s*\d+\/(\d+)\s+\d+\/\d+/);
@@ -567,16 +592,38 @@ async function watch(cfg, ref) {
     const H = bodyHeight();
     const C = cols();
     const barWidth = Math.max(10, Math.min(C - 24, 50));
-    const filled = Math.round((barWidth * percent) / 100);
-    const bar = '█'.repeat(filled) + '░'.repeat(barWidth - filled);
     const jobElapsed = jobElapsedBase !== null
       ? jobElapsedBase + (finished ? 0 : (Date.now() - jobElapsedAt) / 1000)
       : null;
-    const eta = !finished && state === 'RUNNING' ? etaParts(percent, jobElapsed) : null;
+
+    // Decide what the bar is allowed to claim.
+    let barPct = percent;      // what to draw
+    let barNote;               // what it honestly means
+    let eta = null;
+    if (points) {
+      // Known point count: completed solves give a real overall figure.
+      barPct = Math.min(100, Math.round((100 * solvesDone) / points));
+      barNote = `point ${Math.min(solvesDone + 1, points)}/${points} · ${phase} ${percent}%`;
+      if (!finished && solvesDone > 0 && solvesDone < points && jobElapsed) {
+        const remaining = (jobElapsed / solvesDone) * (points - solvesDone);
+        eta = { remaining, finish: easternFinish(Date.now() + remaining * 1000) };
+      }
+    } else if (sawReset) {
+      // Multi-stage job, total unknown: report the stage, never the whole job.
+      barNote = `${phase}${solvesDone ? `  ·  ${solvesDone} solve${solvesDone > 1 ? 's' : ''} done` : ''}`
+        + '  \x1b[2m(stage progress — pass --points N for overall)\x1b[0m';
+    } else {
+      // Single progress meter for the whole run: the old, valid interpretation.
+      barNote = phase;
+      if (!finished && state === 'RUNNING') eta = etaParts(percent, jobElapsed);
+    }
+    const filledB = Math.round((barWidth * barPct) / 100);
+    const bar2 = '█'.repeat(filledB) + '░'.repeat(barWidth - filledB);
     const etaStr = eta ? ` \x1b[2m·  ~${fmtDur(eta.remaining * 1000)} left  ·  done ~${eta.finish}\x1b[0m` : '';
     const head = [
       ` ${job.name}  ·  job ${job.id}  ·  ${state}  ·  ${fmtDur(jobElapsed !== null ? jobElapsed * 1000 : Date.now() - started)}${mem ? `  ·  ${mem}` : ''}`,
-      (` \x1b[32m${bar}\x1b[0m ${String(percent).padStart(3)}%  ${phase}` + etaStr).slice(0, C + (etaStr ? 17 : 9)),
+      (` \x1b[32m${bar2}\x1b[0m ${String(barPct).padStart(3)}%  ${barNote}` + etaStr)
+        .slice(0, C + 9 + (etaStr ? 8 : 0) + (barNote.includes('\x1b') ? 8 : 0)),
       ` \x1b[2m${'─'.repeat(C - 2)}\x1b[0m`,
     ];
     const start = Math.max(0, tailLines.length - H - scroll);
@@ -615,8 +662,10 @@ async function watch(cfg, ref) {
 
   function checkState() {
     const r = spawnSync('ssh', [cfg.clusterHost, `squeue -h -j ${job.id} -o "%T %M"`], { encoding: 'utf8' });
-    if (r.status !== 0) return;
-    const s = r.stdout.trim();
+    // squeue EXITS NONZERO ("Invalid job id specified") once a finished job ages out
+    // of the queue — treat that like an empty result and let sacct give the verdict,
+    // otherwise the viewer waits forever on a job that ended hours ago.
+    const s = r.status === 0 ? r.stdout.trim() : '';
     if (s) {
       const [st, el] = s.split(/\s+/);
       state = st;
@@ -628,7 +677,9 @@ async function watch(cfg, ref) {
       // Job left the queue: show the verdict in the header but keep the TUI
       // open so the log can still be scrolled; q exits.
       const final = spawnSync('ssh', [cfg.clusterHost, `sacct -n -X -j ${job.id} -o State`], { encoding: 'utf8' });
-      finished = (final.stdout || '').trim().split(/\s+/)[0] || 'FINISHED';
+      const verdict = final.status === 0 ? (final.stdout || '').trim().split(/\s+/)[0] : '';
+      if (!verdict) return; // ssh hiccup, not a finished job — keep polling
+      finished = verdict;
       state = finished;
       clearInterval(poll);
     }
@@ -941,7 +992,8 @@ function usage() {
   cluster time <file.mph> [args]     probe-run to estimate runtime + memory (--minutes N, -study stdN)
   cluster status [jobid]             queue overview, or details for one job
   cluster logs [name|jobid]          tail the COMSOL batch log (default: latest job)
-  cluster watch [name|jobid]         live progress bar + streaming log (default: latest job)
+  cluster watch [name|jobid]         live progress + scrollable log (--points N for a sweep's
+                                     overall bar and ETA; default: latest job)
   cluster fetch [name|jobid]         download out.mph + batch.log (default: latest job)
   cluster cancel [name|jobid]        stop a running/queued job (default: latest job)
   cluster fs [lab]                   a lab's score + members ranked by usage (default: your lab)
@@ -968,7 +1020,11 @@ async function main() {
     case 'time':   return timeProbe(cfg, rest);
     case 'status': return status(cfg, rest[0]);
     case 'logs':   return logs(cfg, rest[0]);
-    case 'watch':  return watch(cfg, rest[0]);
+    case 'watch': {
+      const i = rest.indexOf('--points');
+      const n = i === -1 ? null : Number(rest[i + 1]) || null;
+      return watch(cfg, rest.filter((a, k) => k !== i && k !== i + 1)[0], n);
+    }
     case 'fetch':  return fetch(cfg, rest[0]);
     case 'cancel': return cancel(cfg, rest[0]);
     case 'fs':
