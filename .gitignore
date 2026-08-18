@@ -1,0 +1,13 @@
+# build artifacts
+touchid
+node_modules/
+*.class
+.DS_Store
+
+# Lab research data — NOT for publication.
+# COMSOL model exports contain unpublished geometry/physics and embedded
+# absolute paths with real names. Keep your lab's models here; they stay local.
+references/lab/
+
+# local python env for plotting (lives in ~/clt-runs, but just in case)
+.venv/

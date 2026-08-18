@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "clt": {
+      "command": "node",
+      "args": ["mcp/server.mjs"]
+    }
+  }
+}
