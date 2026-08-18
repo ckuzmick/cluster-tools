@@ -740,6 +740,103 @@ async function watch(cfg, ref, points) {
   await new Promise(() => {}); // runs until quit()
 }
 
+// `cluster frames [name|jobid] [--embed] [--open]`
+// Pull the frames/ PNGs a run captured (see references/Snapshots.java) and build
+// a self-contained player so the build/solve can be replayed frame by frame.
+// Relative <img> paths by default; --embed inlines base64 for a single portable
+// file (publishable as an artifact, but much larger).
+async function frames(cfg, rest) {
+  const embed = rest.includes('--embed');
+  const open = rest.includes('--open');
+  const job = findJob(rest.find((a) => !a.startsWith('--')));
+  await ensureMaster(cfg);
+
+  const dest = path.join(os.homedir(), 'clt-runs', `${job.name}-${job.id}`);
+  const framesDir = path.join(dest, 'frames');
+  fs.mkdirSync(framesDir, { recursive: true });
+  console.log(`fetching frames from ${job.dir}/frames/…`);
+  spawnSync('scp', ['-q', `${cfg.clusterHost}:${job.dir}/frames/*.png`, framesDir], { stdio: 'ignore' });
+
+  const files = fs.readdirSync(framesDir).filter((f) => f.endsWith('.png')).sort();
+  if (!files.length) {
+    die(`no frames in ${job.dir}/frames/ — did the model call the snapshot helpers?\n` +
+        '  see references/Snapshots.java');
+  }
+
+  const label = (f) => f.replace(/^\d+_/, '').replace(/\.png$/, '').replace(/_/g, ' ');
+  const src = (f) => (embed
+    ? `data:image/png;base64,${fs.readFileSync(path.join(framesDir, f)).toString('base64')}`
+    : `frames/${f}`);
+  const html = `<title>${job.name} frames</title>
+<style>
+  :root { --bg:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --line:#e1e0d9; --accent:#2a78d6; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+    --bg:#1a1a19; --ink:#fff; --ink2:#c3c2b7; --line:#2c2c2a; --accent:#3987e5; } }
+  :root[data-theme="dark"] { --bg:#1a1a19; --ink:#fff; --ink2:#c3c2b7; --line:#2c2c2a; --accent:#3987e5; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; }
+  main { max-width:1000px; margin:0 auto; padding:24px 20px 48px;
+         display:flex; flex-direction:column; gap:14px; }
+  h1 { font-size:19px; margin:0; }
+  .sub { color:var(--ink2); font-size:13px; }
+  .stage { border:1px solid var(--line); border-radius:8px; background:var(--bg);
+           display:flex; align-items:center; justify-content:center; min-height:340px; overflow:hidden; }
+  .stage img { max-width:100%; height:auto; display:block; }
+  .bar { display:flex; align-items:center; gap:12px; }
+  input[type=range] { flex:1; accent-color:var(--accent); }
+  button { font:inherit; padding:5px 14px; border:1px solid var(--line);
+           border-radius:6px; background:transparent; color:var(--ink); cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  .cap { font-variant-numeric:tabular-nums; color:var(--ink2); min-width:15ch; }
+</style>
+<main>
+  <h1>${job.name} — build replay</h1>
+  <div class="sub">job ${job.id} · ${files.length} frames captured during the run</div>
+  <div class="stage"><img id="f" alt="captured frame"></div>
+  <div class="bar">
+    <button id="p">▶︎ play</button>
+    <input type="range" id="s" min="0" max="${files.length - 1}" value="0" step="1">
+    <span class="cap" id="c"></span>
+  </div>
+</main>
+<script>
+const FRAMES = ${JSON.stringify(files.map((f) => ({ src: src(f), label: label(f) })))};
+const img = document.getElementById('f'), sl = document.getElementById('s');
+const cap = document.getElementById('c'), btn = document.getElementById('p');
+let timer = null;
+function show(i) {
+  img.src = FRAMES[i].src;
+  cap.textContent = (i + 1) + '/' + FRAMES.length + '  ' + FRAMES[i].label;
+  sl.value = i;
+}
+function stop() { clearInterval(timer); timer = null; btn.textContent = '▶︎ play'; }
+btn.onclick = () => {
+  if (timer) return stop();
+  btn.textContent = '❚❚ pause';
+  timer = setInterval(() => {
+    const next = (Number(sl.value) + 1) % FRAMES.length;
+    show(next);
+    if (next === FRAMES.length - 1) stop();
+  }, 600);
+};
+sl.oninput = () => { stop(); show(Number(sl.value)); };
+document.onkeydown = (e) => {
+  if (e.key === 'ArrowRight') { stop(); show(Math.min(Number(sl.value) + 1, FRAMES.length - 1)); }
+  if (e.key === 'ArrowLeft') { stop(); show(Math.max(Number(sl.value) - 1, 0)); }
+};
+show(0);
+</script>
+`;
+  const out = path.join(dest, 'frames.html');
+  fs.writeFileSync(out, html);
+  const mb = (Buffer.byteLength(html) / 1048576).toFixed(1);
+  banner('frames');
+  console.log(`${files.length} frames → ${out}${embed ? `  (self-contained, ${mb} MB)` : ''}`);
+  if (!embed) console.log('\x1b[2mimages referenced from ./frames/ — keep them alongside the html\x1b[0m');
+  if (open) spawnSync('open', [out], { stdio: 'ignore' });
+  else console.log(`\x1b[2mopen it with: open ${out}\x1b[0m`);
+}
+
 async function cancel(cfg, ref) {
   let id, label;
   if (ref && /^\d+$/.test(ref)) {
@@ -995,6 +1092,7 @@ function usage() {
   cluster watch [name|jobid]         live progress + scrollable log (--points N for a sweep's
                                      overall bar and ETA; default: latest job)
   cluster fetch [name|jobid]         download out.mph + batch.log (default: latest job)
+  cluster frames [name|jobid]        replay a run's captured frames (--embed, --open)
   cluster cancel [name|jobid]        stop a running/queued job (default: latest job)
   cluster fs [lab]                   a lab's score + members ranked by usage (default: your lab)
   cluster fs labs [N]                all labs on the cluster ranked by usage (default top 20)
@@ -1026,6 +1124,7 @@ async function main() {
       return watch(cfg, rest.filter((a, k) => k !== i && k !== i + 1)[0], n);
     }
     case 'fetch':  return fetch(cfg, rest[0]);
+    case 'frames': return frames(cfg, rest);
     case 'cancel': return cancel(cfg, rest[0]);
     case 'fs':
     case 'fairshare':
@@ -1047,7 +1146,7 @@ module.exports = {
   run, keychainGet, totp, totpSecondsRemaining,
   masterAlive, ensureMaster, touchIdGate,
   stageInputFile, sbatchScript, submit, timeProbe,
-  status, logs, fetch, cancel, shell, logout,
+  status, logs, fetch, frames, cancel, shell, logout,
   fairshare, fairshareLabs,
   slurmSeconds, slurmTime, recommendMem, etaParts, easternFinish, fmtDur,
   banner, bannerText,

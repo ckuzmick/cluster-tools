@@ -235,17 +235,22 @@ server.tool(
 server.tool(
   'fetch_artifacts',
   'Copy a finished job\'s output files (CSV/TXT/PNG/logs by default) to ~/clt-runs/<name>-<id>/ on this Mac and list the local paths.',
-  { job_id: z.string(), patterns: z.array(z.string()).optional().describe('remote glob patterns, default ["*.csv","*.txt","*.png","*.log"]') },
-  wrap(async ({ job_id, patterns = ['*.csv', '*.txt', '*.png', '*.log'] }) => {
+  { job_id: z.string(), patterns: z.array(z.string()).optional().describe('remote glob patterns, default ["*.csv","*.txt","*.png","*.log","frames/*.png"]') },
+  wrap(async ({ job_id, patterns = ['*.csv', '*.txt', '*.png', '*.log', 'frames/*.png'] }) => {
     const rec = findRecorded(job_id);
     await lib.ensureMaster(cfg);
     const dest = path.join(RUNS_DIR, `${rec.name}-${rec.id}`);
     fs.mkdirSync(dest, { recursive: true });
     for (const pat of patterns) {
-      // per-pattern scp; missing matches are fine
-      spawnSync('scp', ['-q', `${cfg.clusterHost}:${rec.dir}/${pat}`, dest], { stdio: 'ignore' });
+      // per-pattern scp; missing matches are fine. Patterns naming a subdirectory
+      // (frames/*.png) keep that structure locally so `cluster frames` finds them.
+      const sub = pat.includes('/') ? path.join(dest, path.dirname(pat)) : dest;
+      if (sub !== dest) fs.mkdirSync(sub, { recursive: true });
+      spawnSync('scp', ['-q', `${cfg.clusterHost}:${rec.dir}/${pat}`, sub], { stdio: 'ignore' });
     }
-    const files = fs.readdirSync(dest).map((f) => path.join(dest, f));
+    const files = fs.readdirSync(dest, { recursive: true })
+      .map((f) => path.join(dest, f))
+      .filter((f) => fs.statSync(f).isFile());
     if (!files.length) throw new Error(`no artifacts matched ${patterns.join(' ')} in ${rec.dir}`);
     return { job_id, local_dir: dest, files };
   })

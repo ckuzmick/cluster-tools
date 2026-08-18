@@ -14,6 +14,7 @@ async Slurm job, and hands you back a job id. Later:
 cluster status          # queue overview
 cluster logs            # tail the COMSOL batch log of the latest job
 cluster fetch           # download out.mph + batch.log when it's done
+cluster frames          # replay the frames a run captured (--embed, --open)
 cluster shell           # drop into an interactive shell (no re-login)
 cluster code            # print the current 2FA code, e.g. for a manual login
 ```

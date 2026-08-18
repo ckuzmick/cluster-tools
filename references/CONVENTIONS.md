@@ -47,6 +47,20 @@ silently point at the wrong faces (jobs 39887624, 39888292 died this way).
 - A wide ball probe (r ≈ 1.5 × feature size, curved walls included) is the right
   tool for MESH size selections, which need no congruence.
 
+## Capturing frames during a run (imaging)
+`Snapshots.java` holds the reusable block. Two different APIs, because they have
+different prerequisites:
+- **Geometry / mesh** need no solution:
+  `model.component(c).geom(g).image().set("pngfilename", f); ...image().export();`
+  (same shape for `mesh(m).image()`). This is what makes a build filmstrip possible.
+- **Result plots** need a dataset: create a `PlotGroup3D`, then
+  `model.result().export().create(tag, pgtag, "Image")`, set `pngfilename`, `.run()`.
+  Select the eigenmode with `result(pg).setIndex("looplevel", k, 0)`.
+- Write frames to `frames/NNNN_label.png` — `cluster frames` and `fetch_artifacts`
+  both look there, and the numeric prefix defines playback order.
+- Set every image property through a tolerant helper that logs a rejected property
+  name and carries on. Imaging must never be able to fail a solve.
+
 ## Sanity rules before trusting a solve
 - Export geometry + mesh images and look at them.
 - Check an analytic or known benchmark when one exists (e.g. rigid-box modes).
@@ -56,5 +70,6 @@ silently point at the wrong faces (jobs 39887624, 39888292 died this way).
 - `HelloBox.java` — minimal build-solve-export pattern (phase-0 proof).
 - `SweepBox.java` — parametric sweep in one job (rebuild → re-run → append).
 - `Inspect.java` — dump a loaded .mph's structure (use with run_code + mph_file).
+- `Snapshots.java` — capture geometry/mesh/mode frames during a run (`cluster frames`).
 - `lab/` (gitignored) — your own model exports and derived model code.
   See `lab/README.md`; keep unpublished research out of version control.
