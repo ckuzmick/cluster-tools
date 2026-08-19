@@ -440,6 +440,49 @@ async function timeProbe(cfg, rest) {
   }
 }
 
+// Machine-readable status for the menu-bar app and any other poller.
+// Deliberately NEVER logs in: a background poller that could trigger the
+// expect+TOTP flow would burn one-time codes and risk locking the account.
+// If the shared session is down it says so and returns nothing else.
+function statusJson(cfg) {
+  if (!masterAlive(cfg)) {
+    console.log(JSON.stringify({ session: 'down', jobs: [] }));
+    return;
+  }
+  const q = spawnSync('ssh', [cfg.clusterHost, 'squeue --me -h -o "%i|%j|%T|%M|%l|%C"'], { encoding: 'utf8' });
+  if (q.status !== 0) {
+    console.log(JSON.stringify({ session: 'error', jobs: [] }));
+    return;
+  }
+  const recorded = loadJobs();
+  const jobs = q.stdout.trim() ? q.stdout.trim().split('\n').map((line) => {
+    const [id, name, state, elapsed, limit, cpus] = line.trim().split('|');
+    const job = { id, name, state, elapsed, limit, cpus: Number(cpus) };
+    const rec = recorded.find((r) => r.id === id);
+    if (rec && state === 'RUNNING') {
+      const probe = spawnSync('ssh', [cfg.clusterHost,
+        `awk '/Current Progress:/ { if (match($0, /Current Progress: *[0-9]+/)) { ` +
+        `p = substr($0, RSTART, RLENGTH); gsub(/[^0-9]/, "", p); ` +
+        `if (p + 0 < last - 20) reset = 1; last = p + 0 } } ` +
+        `/^-{3,}.*[Ss]olver.*in .*-{3,}>[[:space:]]*$/ { solves++ } ` +
+        `END { print last + 0, reset + 0, solves + 0 }' ${rec.dir}/batch.log 2>/dev/null || true`],
+        { encoding: 'utf8' });
+      const [pct, reset, solves] = (probe.stdout || '').trim().split(/\s+/).map(Number);
+      if (Number.isFinite(pct)) {
+        job.stagePct = pct;
+        job.solvesDone = solves || 0;
+        job.multiStage = Boolean(reset);
+        if (!reset) {
+          const e = etaParts(pct, slurmSeconds(elapsed));
+          if (e) job.finishEastern = e.finish;
+        }
+      }
+    }
+    return job;
+  }) : [];
+  console.log(JSON.stringify({ session: 'up', jobs }));
+}
+
 async function status(cfg, jobid) {
   await ensureMaster(cfg);
   if (jobid) {
@@ -1087,7 +1130,7 @@ function usage() {
   console.log(`usage:
   cluster <file.mph> [comsol args]   fetch from Windows if needed, upload, run async via sbatch
   cluster time <file.mph> [args]     probe-run to estimate runtime + memory (--minutes N, -study stdN)
-  cluster status [jobid]             queue overview, or details for one job
+  cluster status [jobid]             queue overview, or details for one job (--json for pollers)
   cluster logs [name|jobid]          tail the COMSOL batch log (default: latest job)
   cluster watch [name|jobid]         live progress + scrollable log (--points N for a sweep's
                                      overall bar and ETA; default: latest job)
@@ -1116,7 +1159,7 @@ async function main() {
   const cfg = loadConfig();
   switch (cmd) {
     case 'time':   return timeProbe(cfg, rest);
-    case 'status': return status(cfg, rest[0]);
+    case 'status': return rest.includes('--json') ? statusJson(cfg) : status(cfg, rest[0]);
     case 'logs':   return logs(cfg, rest[0]);
     case 'watch': {
       const i = rest.indexOf('--points');
@@ -1146,7 +1189,7 @@ module.exports = {
   run, keychainGet, totp, totpSecondsRemaining,
   masterAlive, ensureMaster, touchIdGate,
   stageInputFile, sbatchScript, submit, timeProbe,
-  status, logs, fetch, frames, cancel, shell, logout,
+  status, statusJson, logs, fetch, frames, cancel, shell, logout,
   fairshare, fairshareLabs,
   slurmSeconds, slurmTime, recommendMem, etaParts, easternFinish, fmtDur,
   banner, bannerText,

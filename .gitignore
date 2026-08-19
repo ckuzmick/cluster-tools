@@ -1,5 +1,7 @@
 # build artifacts
 touchid
+clusterbar
+clusterbar.app/
 node_modules/
 *.class
 .DS_Store

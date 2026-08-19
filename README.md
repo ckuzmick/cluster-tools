@@ -223,6 +223,38 @@ Agents that can't see `references/` (a non–Claude Code client, say) should be
 told to read `references/CONVENTIONS.md` first — that file is what keeps
 generated models from tripping the known COMSOL API traps.
 
+## Menu-bar readout (optional)
+
+`menubar.swift` builds a tiny status-bar app so the current job is always on
+screen — no dock icon, no third-party menu-bar host, just AppKit:
+
+```sh
+swiftc -O menubar.swift -o clusterbar
+mkdir -p clusterbar.app/Contents/MacOS && cp clusterbar clusterbar.app/Contents/MacOS/
+# Info.plist with LSUIElement=true — see the header comment in menubar.swift
+open clusterbar.app     # add to System Settings -> Login Items to keep it up
+```
+
+It shows `◉ 29:13` while a job runs (elapsed, or a percentage when that
+percentage genuinely means whole-job progress), `○` when the queue is empty,
+and `◌` when there is no cluster session. The dropdown lists each job with
+state, limit, cores, stage progress and completed solves, plus a "Watch in
+Terminal" action. `CLUSTERBAR_STYLE=full` adds the job name to the bar and
+`CLUSTERBAR_INTERVAL=60` slows the 30-second poll.
+
+Two deliberate properties:
+
+- **It can never log in.** It calls `cluster status --json`, which checks for a
+  live shared session and reports `offline` rather than starting the TOTP login
+  flow. A background poller that could authenticate would burn one-time codes
+  and risk locking the account.
+- **Keep the title short.** macOS silently *drops* a status item that does not
+  fit the available slot rather than truncating it — a 135pt title vanished on
+  a notched MacBook where a 45pt one displayed. Detail belongs in the dropdown.
+
+While it polls, the ssh session never idles out, so it stays authenticated
+until you quit it or run `cluster logout`.
+
 ## Forking for lab members
 
 The repo contains **zero** personal data: config lives in `~/.config/clt/`,
