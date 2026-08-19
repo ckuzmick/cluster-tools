@@ -483,6 +483,55 @@ function statusJson(cfg) {
   console.log(JSON.stringify({ session: 'up', jobs }));
 }
 
+// `cluster jobs [--all]` — the history this tool has recorded, joined with
+// Slurm's final verdict. Finding a past run is otherwise guesswork: logs,
+// watch and fetch all take a name, but nothing listed the names.
+async function jobsList(cfg, rest) {
+  const recorded = loadJobs();
+  if (!recorded.length) die('no jobs submitted yet');
+  const shown = rest.includes('--all') ? [...recorded].reverse() : [...recorded].reverse().slice(0, 15);
+  await ensureMaster(cfg);
+
+  const verdicts = new Map();
+  const out = run('ssh', [cfg.clusterHost,
+    `sacct -X -n -P -j ${shown.map((j) => j.id).join(',')} -o JobID,State,Elapsed`]);
+  for (const line of out.trim().split('\n')) {
+    if (!line.trim()) continue;
+    const [id, rawState, elapsed] = line.split('|');
+    // sacct reports "CANCELLED by 34567"; the uid is noise in a history list
+    const state = (rawState || '').trim().replace(/ by \d+$/, '');
+    verdicts.set(id.split('.')[0].trim(), { state, elapsed: (elapsed || '').trim() });
+  }
+
+  const stateColor = (st) => {
+    if (/^COMPLETED/.test(st)) return ramp(1);
+    if (/^RUNNING/.test(st)) return ramp(0.75);
+    if (/^PENDING|^REQUEUED|^SUSPENDED/.test(st)) return ramp(0.55);
+    return ramp(0);                       // FAILED, TIMEOUT, CANCELLED, OOM
+  };
+
+  const view = [bannerText('jobs', '34'), ''];
+  view.push(`\x1b[2m  ${'job id'.padEnd(10)}${'name'.padEnd(26)}${'submitted'.padEnd(18)}`
+    + `${'state'.padEnd(12)}${'elapsed'.padStart(9)}   saved\x1b[0m`);
+  for (const j of shown) {
+    const v = verdicts.get(j.id) || { state: 'UNKNOWN', elapsed: '' };
+    const when = new Date(j.submitted).toLocaleString('en-US',
+      { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    const localDir = path.join(os.homedir(), 'clt-runs', `${j.name}-${j.id}`);
+    const saved = fs.existsSync(localDir)
+      ? `\x1b[${ramp(1)}m✓\x1b[0m`
+      : '\x1b[2m·\x1b[0m';
+    view.push(`  ${j.id.padEnd(10)}${j.name.slice(0, 25).padEnd(26)}\x1b[2m${when.padEnd(18)}\x1b[0m`
+      + `\x1b[${stateColor(v.state)}m${v.state.slice(0, 11).padEnd(12)}\x1b[0m`
+      + `${v.elapsed.padStart(9)}   ${saved}`);
+  }
+  view.push('',
+    `\x1b[2m  ${shown.length} of ${recorded.length} recorded${rest.includes('--all') ? '' : ' (--all for the rest)'}`
+    + ' · ✓ = artifacts fetched to ~/clt-runs\x1b[0m',
+    '\x1b[2m  cluster logs <name> · cluster watch <name> · cluster fetch <name>\x1b[0m');
+  page(view.join('\n'));
+}
+
 async function status(cfg, jobid) {
   await ensureMaster(cfg);
   if (jobid) {
@@ -1207,6 +1256,7 @@ function usage() {
   console.log(`usage:
   cluster <file.mph> [comsol args]   fetch from Windows if needed, upload, run async via sbatch
   cluster time <file.mph> [args]     probe-run to estimate runtime + memory (--minutes N, -study stdN)
+  cluster jobs [--all]               every job this tool submitted, with its final state
   cluster status [jobid]             queue overview, or details for one job (--json for pollers)
   cluster logs [name|jobid]          tail the COMSOL batch log (default: latest job)
   cluster watch [name|jobid]         live progress + scrollable log (--points N for a sweep's
@@ -1236,6 +1286,7 @@ async function main() {
   const cfg = loadConfig();
   switch (cmd) {
     case 'time':   return timeProbe(cfg, rest);
+    case 'jobs':   return jobsList(cfg, rest);
     case 'status': return rest.includes('--json') ? statusJson(cfg) : status(cfg, rest[0]);
     case 'logs':   return logs(cfg, rest[0]);
     case 'watch': {
@@ -1266,7 +1317,7 @@ module.exports = {
   run, keychainGet, totp, totpSecondsRemaining,
   masterAlive, ensureMaster, touchIdGate,
   stageInputFile, sbatchScript, submit, timeProbe,
-  status, statusJson, logs, fetch, frames, cancel, shell, logout,
+  jobsList, status, statusJson, logs, fetch, frames, cancel, shell, logout,
   fairshare, fairshareLabs,
   slurmSeconds, slurmTime, recommendMem, etaParts, easternFinish, fmtDur,
   banner, bannerText, ramp, rampLegend,
