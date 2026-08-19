@@ -28,7 +28,11 @@ const RUNS_DIR = path.join(os.homedir(), 'clt-runs');
 
 // Guardrails: keep the AI polite on a shared cluster. Hard limits, not hints.
 const GUARD = {
-  maxActiveJobs: 4,
+  // COMSOL licences are shared across all of SEAS and are the real limit:
+  // specialised modules have as few as 2 BATCH seats, so more than a couple of
+  // concurrent jobs will simply fail to check one out. Use license_seats to see
+  // the live picture before fanning out.
+  maxActiveJobs: 2,
   maxCpus: 16,
   maxMemGB: 64,
   maxHours: 48,
@@ -68,7 +72,8 @@ async function activeJobs() {
 async function guardConcurrency() {
   const jobs = await activeJobs();
   if (jobs.length >= GUARD.maxActiveJobs) {
-    throw new Error(`guardrail: ${jobs.length} jobs already active (max ${GUARD.maxActiveJobs}) — wait for one to finish or cancel it`);
+    throw new Error(`guardrail: ${jobs.length} jobs already active (max ${GUARD.maxActiveJobs}, set by shared `
+      + `COMSOL licence seats) — wait for one to finish, or check license_seats`);
   }
 }
 
@@ -289,6 +294,23 @@ server.tool(
     await lib.ensureMaster(cfg);
     lib.run('ssh', [cfg.clusterHost, `scancel ${job_id}`]);
     return { job_id, cancelled: true };
+  })
+);
+
+server.tool(
+  'license_seats',
+  'COMSOL licence seats across SEAS: how many of each feature are issued, how many are in use and by whom. Licences are shared school-wide and are usually a tighter limit than the cluster — a specialised module may have only 2 BATCH seats, and every batch job needs COMSOLBATCH plus the BATCH seat of each module it uses. CHECK THIS BEFORE LAUNCHING SEVERAL JOBS; a job that cannot get a seat fails with a confusing Slurm log. The query runs in a short compute-node allocation and is cached for 5 minutes.',
+  { refresh: z.boolean().optional().describe('bypass the 5-minute cache'), all: z.boolean().optional().describe('include features with no seats in use') },
+  wrap(async ({ refresh = false, all = false }) => {
+    const { ageMin, features } = await lib.licenseStatus(cfg, { refresh });
+    const shown = all ? features.filter((f) => f.total > 0)
+      : features.filter((f) => f.used > 0 || /^COMSOL(BATCH)?$/.test(f.name));
+    return {
+      checked_minutes_ago: Math.round(ageMin),
+      features: shown.map((f) => ({ name: f.name, total: f.total, used: f.used, free: f.free,
+        holders: f.who.map((w) => w.user) })),
+      note: 'a batch job needs COMSOLBATCH plus the BATCH seat of every module it uses',
+    };
   })
 );
 

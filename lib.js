@@ -290,12 +290,12 @@ const LMSTAT = '/n/sw/comsol/comsol64/license/glnxa64/lmstat';
 
 // The licence server is firewalled from the login node, so the query has to run
 // on a compute node. That costs a tiny allocation, hence the cache.
-async function licenses(cfg, rest) {
-  const all = rest.includes('--all');
+/** Parsed licence state, shared by the CLI view and the MCP tool. */
+async function licenseStatus(cfg, { refresh = false } = {}) {
   const cached = loadState().licenses;
   let ageMin = cached ? (Date.now() - new Date(cached.at).getTime()) / 60000 : Infinity;
   let raw;
-  if (cached && ageMin < 5 && !rest.includes('--refresh')) {
+  if (cached && ageMin < 5 && !refresh) {
     raw = cached.raw;
   } else {
     await ensureMaster(cfg);
@@ -320,6 +320,13 @@ async function licenses(cfg, rest) {
     if (user && cur) cur.who.push({ user: user[1], since: user[2] });
   }
   if (!feats.length) die(`could not read licence status:\n${raw.trim().split('\n').slice(-3).join('\n')}`);
+  for (const f of feats) f.free = f.total - f.used;
+  return { ageMin, features: feats };
+}
+
+async function licenses(cfg, rest) {
+  const all = rest.includes('--all');
+  const { ageMin, features: feats } = await licenseStatus(cfg, { refresh: rest.includes('--refresh') });
 
   const busy = feats.filter((f) => f.used > 0);
   const always = feats.filter((f) => /^COMSOL(BATCH)?$/.test(f.name));
@@ -1495,7 +1502,7 @@ module.exports = {
   run, keychainGet, totp, totpSecondsRemaining,
   masterAlive, ensureMaster, touchIdGate,
   stageInputFile, sbatchScript, submit, timeProbe,
-  doctor, licenses, jobsList, status, statusJson, logs, fetch, frames, cancel, shell, logout,
+  doctor, licenses, licenseStatus, jobsList, status, statusJson, logs, fetch, frames, cancel, shell, logout,
   fairshare, fairshareLabs,
   slurmSeconds, slurmTime, recommendMem, etaParts, easternFinish, fmtDur,
   banner, bannerText, ramp, rampLegend,
