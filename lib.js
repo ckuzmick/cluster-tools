@@ -1052,9 +1052,9 @@ async function fairshare(cfg, labArg) {
 
   view.push(
     '',
-    `RawUsage  vs an equal share of the lab  ${rampLegend('none', '2\u00d7 or more', { reverse: true })}`,
-    `FairShare 0.5 = neutral                 ${rampLegend('0 over budget', '1 idle')}`,
-    '\x1b[2mUsage decays with a 3-day half-life; jobs bill allocated CPUs + memory (~1 core per 4 GB).\x1b[0m'
+    `  ${rampLegend('light \u00b7 healthy', 'heavy \u00b7 over budget', { reverse: true })}`,
+    '\x1b[2m  RawUsage is judged against an equal share of the lab; FairShare 0.5 = neutral.\x1b[0m',
+    '\x1b[2m  Usage decays with a 3-day half-life; jobs bill allocated CPUs + memory (~1 core per 4 GB).\x1b[0m'
   );
   page(view.join('\n'));
 }
@@ -1099,8 +1099,8 @@ async function fairshareLabs(cfg, topN) {
     view.push(fmtRow(myRank + 1, labs[myRank]));
   }
 
-  view.push('', `\x1b[2m${labs.length} lab accounts, ranked by decayed usage. fairshare = 2^(\u2212%used/%grant)\x1b[0m`,
-    `   ${rampLegend('0 over budget', '1 idle')}`);
+  view.push('', `  ${rampLegend('light \u00b7 healthy', 'heavy \u00b7 over budget', { reverse: true })}`,
+    `\x1b[2m  ${labs.length} lab accounts ranked by decayed usage; fairshare = 2^(\u2212%used/%grant), 0.5 = neutral.\x1b[0m`);
   page(view.join('\n'));
 }
 
