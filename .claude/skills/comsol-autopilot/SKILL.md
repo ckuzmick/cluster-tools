@@ -6,11 +6,15 @@ description: Run COMSOL studies end-to-end on the Harvard FASRC cluster from an 
 # COMSOL autopilot
 
 You have MCP tools (`clt` server): `run_code`, `run_model`, `job_status`, `job_log`,
-`wait_for_job`, `fetch_artifacts`, `cancel_job`, `lab_fairshare`, `license_seats`. Together they run
+`wait_for_job`, `fetch_artifacts`, `cancel_job`, `lab_fairshare`, `license_seats`,
+`job_efficiency`, `job_history`, `run_report`, `record_lesson`, `lessons`. Together they run
 COMSOL on the cluster with no GUI. The user should never have to touch COMSOL.
 
 ## Before anything
 
+0. **`lessons`** — call it first, every session. It is short, and it is what
+   previous runs learned the expensive way. Anything in there is a mistake that
+   has already cost cluster time once.
 1. Read `references/CONVENTIONS.md`, plus `references/lab/LAB_NOTES.md` if it
    exists — they list known COMSOL Java API traps and lab-specific facts that
    WILL waste runs if ignored (meshing idiom, study/mesh binding, chdir).
@@ -51,6 +55,14 @@ COMSOL on the cluster with no GUI. The user should never have to touch COMSOL.
    chart (load the dataviz skill before plotting), and give a written verdict
    against the hypothesis plus proposed next steps. Keep `PLAN.md` updated with
    what actually happened.
+6. **Close the loop — do not skip this.** Call `run_report` on every finished job:
+   it records requested-vs-actual resources, artifacts and any errors, cheaply and
+   without judgement. Then call `job_efficiency` and, if the next run should be
+   sized differently, say so. Finally call `record_lesson` for anything a future
+   session would otherwise rediscover — an API trap, a working idiom, a real
+   resource figure, a cluster quirk. One sentence, actionable. This feedback loop
+   is why the setup gets better with use; two people are using it, so every lesson
+   compounds immediately.
 
 ## Writing model Java
 

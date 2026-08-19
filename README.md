@@ -18,6 +18,10 @@ cluster frames          # replay the frames a run captured (--embed, --open)
 cluster jobs            # every job you have submitted, with its final state
 cluster seats           # COMSOL licence seats in use across SEAS
 cluster doctor          # check every setup step and name what is broken
+cluster eff <job>       # what a run actually used, and how to right-size it
+cluster load            # live cluster utilisation + node mosaic
+cluster report <job>    # write RUN_NOTES.md: config, usage, errors
+cluster lessons         # accumulated notes on using this tool well
 cluster shell           # drop into an interactive shell (no re-login)
 cluster code            # print the current 2FA code, e.g. for a manual login
 ```

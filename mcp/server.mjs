@@ -298,6 +298,75 @@ server.tool(
 );
 
 server.tool(
+  'job_efficiency',
+  'What a finished job ACTUALLY used versus what it requested (CPU %, memory used vs requested). Fairshare bills what you request, not what you use, and larger requests also queue more slowly — so read this after a run and right-size the next one instead of copying defaults forward.',
+  { job_id: z.string().describe('Slurm job id, or a name this tool recorded') },
+  wrap(async ({ job_id }) => {
+    const e = await lib.effStatus(cfg, job_id);
+    const suggestGb = e.memUsedGb == null ? null : Math.max(4, Math.ceil((e.memUsedGb * 1.5) / 4) * 4);
+    return {
+      job_id: e.id, name: e.name, state: e.state, wall_clock: e.wall, cores: e.cores,
+      cpu_pct: e.cpuPct, mem_used_gb: e.memUsedGb, mem_requested_gb: e.memReqGb, mem_pct: e.memPct,
+      suggested_mem_gb: suggestGb,
+      suggestion: suggestGb && e.memReqGb && suggestGb < e.memReqGb * 0.75
+        ? `request ${suggestGb}G next time (peak ${e.memUsedGb.toFixed(1)} GB + 50% headroom)`
+        : 'sizing looks reasonable',
+    };
+  })
+);
+
+server.tool(
+  'job_history',
+  'Past runs this tool submitted, newest first, joined with their final Slurm state. Use it to learn from what already happened here — typical runtimes for a model, which settings worked, what failed — instead of starting from scratch each session.',
+  { limit: z.number().optional().describe('how many runs to return (default 15)') },
+  wrap(async ({ limit = 15 }) => {
+    const recorded = lib.loadJobs().slice(-limit).reverse();
+    if (!recorded.length) return { runs: [] };
+    await lib.ensureMaster(cfg);
+    const out = lib.run('ssh', [cfg.clusterHost,
+      `sacct -X -n -P -j ${recorded.map((j) => j.id).join(',')} -o JobID,State,Elapsed`]);
+    const by = new Map();
+    for (const line of out.trim().split('\n')) {
+      if (!line.trim()) continue;
+      const [id, st, el] = line.split('|');
+      by.set(id.split('.')[0].trim(), { state: (st || '').replace(/ by \d+$/, '').trim(), elapsed: (el || '').trim() });
+    }
+    return {
+      runs: recorded.map((j) => ({
+        job_id: j.id, name: j.name, submitted: j.submitted, remote_dir: j.dir,
+        ...(by.get(j.id) || { state: 'UNKNOWN', elapsed: null }),
+        notes_file: `~/clt-runs/${j.name}-${j.id}/RUN_NOTES.md`,
+      })),
+    };
+  })
+);
+
+server.tool(
+  'run_report',
+  'Gather everything worth knowing about a finished run — requested vs actual resources, artifacts produced, and any errors extracted from the logs — and write it to ~/clt-runs/<name>-<id>/RUN_NOTES.md. CALL THIS AFTER EVERY RUN: it is the factual half of the feedback loop, and costs one cheap query.',
+  { job_id: z.string() },
+  wrap(async ({ job_id }) => lib.runReport(cfg, job_id))
+);
+
+server.tool(
+  'record_lesson',
+  'Append something worth not relearning to references/LESSONS.md — an API trap, a working idiom, a resource figure, a cluster quirk. This is the judgement half of the feedback loop: run_report captures facts automatically, this captures what they MEAN. Keep entries one sentence and actionable. Every future session reads them via the lessons tool.',
+  {
+    lesson: z.string().describe('one actionable sentence'),
+    category: z.string().optional().describe('short tag: comsol-api, resources, cluster, mcp, physics'),
+    job_id: z.string().optional().describe('the run that taught it, if any'),
+  },
+  wrap(async ({ lesson, category = 'general', job_id = null }) => lib.recordLesson({ lesson, category, jobId: job_id }))
+);
+
+server.tool(
+  'lessons',
+  'Everything previous sessions learned about using this tool and COMSOL on this cluster. READ THIS FIRST — it is short, and it is how the setup avoids repeating mistakes that already cost cluster time.',
+  {},
+  wrap(async () => ({ lessons: lib.readLessons() || '(nothing recorded yet)' }))
+);
+
+server.tool(
   'license_seats',
   'COMSOL licence seats across SEAS: how many of each feature are issued, how many are in use and by whom. Licences are shared school-wide and are usually a tighter limit than the cluster — a specialised module may have only 2 BATCH seats, and every batch job needs COMSOLBATCH plus the BATCH seat of each module it uses. CHECK THIS BEFORE LAUNCHING SEVERAL JOBS; a job that cannot get a seat fails with a confusing Slurm log. The query runs in a short compute-node allocation and is cached for 5 minutes.',
   { refresh: z.boolean().optional().describe('bypass the 5-minute cache'), all: z.boolean().optional().describe('include features with no seats in use') },
