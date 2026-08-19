@@ -15,6 +15,9 @@ cluster status          # queue overview
 cluster logs            # tail the COMSOL batch log of the latest job
 cluster fetch           # download out.mph + batch.log when it's done
 cluster frames          # replay the frames a run captured (--embed, --open)
+cluster jobs            # every job you have submitted, with its final state
+cluster seats           # COMSOL licence seats in use across SEAS
+cluster doctor          # check every setup step and name what is broken
 cluster shell           # drop into an interactive shell (no re-login)
 cluster code            # print the current 2FA code, e.g. for a manual login
 ```
@@ -151,10 +154,38 @@ seed. Secrets go into the macOS Keychain (never on disk, never in this repo).
 Setup ends by printing a generated 2FA code — **verify it matches what the
 Java app shows** before trusting it.
 
-Then confirm on the cluster (once, via `cluster shell`):
+### 7. Check your work
 
-- `module avail comsol` — set the exact module name in `~/.config/clt/config.json`
-- your group has COMSOL license seats, and pick the right partition for your lab
+```sh
+cluster doctor
+```
+
+Walks every step above and names what is broken, with a one-line fix for each:
+Node version, whether `cluster` actually resolves to this tool (a stale shell
+alias will shadow it), the ssh config block and sockets directory, both
+Keychain items, **clock drift** (TOTP fails silently if your Mac's clock is
+off, and it looks exactly like a wrong password), your current 2FA code to
+compare against the OpenAuth app, and — if a session is already up — the
+COMSOL module, home-directory space and your queue. It never logs in, so it
+is safe to run when things are broken.
+
+## Licence seats
+
+```sh
+cluster seats           # features in use, who holds them, how many are free
+cluster seats --all     # include the idle features
+```
+
+COMSOL licences are shared across all of SEAS and are usually the real limit
+on how many jobs can run at once — often tighter than the cluster itself.
+Base `COMSOL` has 13 seats, but a specialised module may have only one or two,
+and a batch job needs `COMSOLBATCH` plus the BATCH seat of every module it
+uses. Check here before launching a sweep; a job that cannot get a seat fails
+in a way the Slurm log explains badly.
+
+The licence server is firewalled from the login node, so this runs `lmstat` in
+a one-minute allocation on the `test` partition and caches the answer for five
+minutes (`--refresh` to force).
 
 ## Usage
 

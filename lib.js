@@ -283,6 +283,179 @@ exit [lindex $r 3]
   return true;
 }
 
+// ---------- COMSOL licence seats ----------
+
+const LICENSE_SERVER = '27005@research-license.int.seas.harvard.edu';
+const LMSTAT = '/n/sw/comsol/comsol64/license/glnxa64/lmstat';
+
+// The licence server is firewalled from the login node, so the query has to run
+// on a compute node. That costs a tiny allocation, hence the cache.
+async function licenses(cfg, rest) {
+  const all = rest.includes('--all');
+  const cached = loadState().licenses;
+  let ageMin = cached ? (Date.now() - new Date(cached.at).getTime()) / 60000 : Infinity;
+  let raw;
+  if (cached && ageMin < 5 && !rest.includes('--refresh')) {
+    raw = cached.raw;
+  } else {
+    await ensureMaster(cfg);
+    console.log('asking a compute node (the licence server is unreachable from the login node)…');
+    raw = run('ssh', [cfg.clusterHost,
+      `srun -p test -t 2 -c 1 --mem=1G ${LMSTAT} -c ${LICENSE_SERVER} -a 2>&1`]);
+    saveState({ licenses: { at: new Date().toISOString(), raw } });
+    ageMin = 0;
+  }
+
+  // Parse feature totals and, under each, who currently holds a seat.
+  const feats = [];
+  let cur = null;
+  for (const line of raw.split('\n')) {
+    const head = /^Users of (\S+):\s+\(Total of (\d+) licenses? issued;\s+Total of (\d+) licenses? in use\)/.exec(line);
+    if (head) {
+      cur = { name: head[1], total: Number(head[2]), used: Number(head[3]), who: [] };
+      feats.push(cur);
+      continue;
+    }
+    const user = /^\s+(\S+)\s+\S+.*start\s+(.+?)\s*$/.exec(line);
+    if (user && cur) cur.who.push({ user: user[1], since: user[2] });
+  }
+  if (!feats.length) die(`could not read licence status:\n${raw.trim().split('\n').slice(-3).join('\n')}`);
+
+  const busy = feats.filter((f) => f.used > 0);
+  const always = feats.filter((f) => /^COMSOL(BATCH)?$/.test(f.name));
+  const shown = all ? feats.filter((f) => f.total > 0)
+    : [...new Set([...always, ...busy])].sort((a, b) => (b.used / b.total) - (a.used / a.total) || b.used - a.used);
+
+  const view = [bannerText('seats', '34'), ''];
+  const W = 22;
+  for (const f of shown) {
+    const frac = f.total ? f.used / f.total : 0;
+    const barW = 14;
+    const fill = Math.round(barW * frac);
+    const c = ramp(1 - frac);                      // green = seats free, red = saturated
+    const bar = `\x1b[${c}m${'█'.repeat(fill)}\x1b[0m\x1b[2m${'░'.repeat(barW - fill)}\x1b[0m`;
+    view.push(`  ${f.name.padEnd(W)}${bar}  \x1b[${c}m${String(f.used).padStart(2)}/${String(f.total).padEnd(3)}\x1b[0m`
+      + `\x1b[2m${f.total - f.used} free${f.who.length ? '  ·  ' + f.who.map((w) => w.user).join(', ') : ''}\x1b[0m`);
+  }
+  const idle = feats.filter((f) => f.total > 0 && f.used === 0).length;
+  view.push('',
+    `\x1b[2m  ${shown.length} shown${all ? '' : `, ${idle} idle features hidden (--all)`}`
+    + `  ·  checked ${ageMin < 1 ? 'just now' : `${Math.round(ageMin)} min ago`} (--refresh)\x1b[0m`,
+    '\x1b[2m  Seats are shared across SEAS. A batch job needs COMSOLBATCH plus the BATCH seat\x1b[0m',
+    '\x1b[2m  for each module it uses, so the scarcest module caps how many jobs can run at once.\x1b[0m');
+  page(view.join('\n'));
+}
+
+// ---------- doctor: find the broken link in the setup chain ----------
+
+// Every step in README setup can fail silently and the resulting errors are
+// unhelpful ("scp: Connection closed"). This walks the whole chain and names
+// what is wrong. It NEVER logs in — a diagnostic that burns OTP codes would
+// be worse than the problem.
+function doctor() {
+  const OK = 'ok', WARN = 'warn', BAD = 'bad';
+  const mark = { ok: `\x1b[${ramp(1)}m✓\x1b[0m`, warn: `\x1b[${ramp(0.55)}m!\x1b[0m`, bad: `\x1b[${ramp(0)}m✗\x1b[0m` };
+  const out = [];
+  let bad = 0, warn = 0;
+  const check = (label, status, detail, fix) => {
+    if (status === BAD) bad++;
+    if (status === WARN) warn++;
+    out.push(`  ${mark[status]} ${label.padEnd(26)}\x1b[2m${detail || ''}\x1b[0m`
+      + (fix && status !== OK ? `\n      \x1b[2m→ ${fix}\x1b[0m` : ''));
+  };
+
+  // --- local ---
+  const major = Number(process.versions.node.split('.')[0]);
+  check('node', major >= 18 ? OK : BAD, `v${process.versions.node}`, 'install Node 18 or newer');
+
+  const which = spawnSync('which', ['cluster'], { encoding: 'utf8' }).stdout.trim();
+  let resolved = '';
+  try { resolved = fs.realpathSync(which); } catch { /* not found */ }
+  const mine = fs.realpathSync(path.join(__dirname, 'cluster.js'));
+  check('`cluster` command', resolved === mine ? OK : BAD,
+    which || 'not on PATH',
+    resolved ? `resolves elsewhere — a stale shell alias? run: unalias cluster` : 'run `npm link` in the repo');
+
+  let cfg = null;
+  try { cfg = loadConfig(); } catch { /* handled below */ }
+  check('config file', cfg ? OK : BAD, cfg ? CONFIG_PATH : 'missing', 'run: cluster setup');
+  if (!cfg) cfg = DEFAULT_CONFIG;
+
+  const sshCfg = path.join(os.homedir(), '.ssh', 'config');
+  const text = fs.existsSync(sshCfg) ? fs.readFileSync(sshCfg, 'utf8') : '';
+  const block = new RegExp(`^Host\\s+.*\\b${cfg.clusterHost}\\b[\\s\\S]*?(?=^Host\\s|\\Z)`, 'm').exec(text);
+  const hasMaster = block && /ControlMaster\s+auto/i.test(block[0]) && /ControlPath/i.test(block[0]);
+  check(`ssh config (${cfg.clusterHost})`, hasMaster ? OK : BAD,
+    block ? (hasMaster ? 'ControlMaster set' : 'block found, no ControlMaster') : 'no Host block',
+    'add the Host block from README step 2');
+
+  const sockets = path.join(os.homedir(), '.ssh', 'sockets');
+  check('~/.ssh/sockets', fs.existsSync(sockets) ? OK : BAD, sockets, 'mkdir -p ~/.ssh/sockets');
+
+  const havePw = spawnSync('security', ['find-generic-password', '-a', os.userInfo().username,
+    '-s', KEYCHAIN_PASSWORD], { stdio: 'ignore' }).status === 0;
+  const haveSeed = spawnSync('security', ['find-generic-password', '-a', os.userInfo().username,
+    '-s', KEYCHAIN_TOTP], { stdio: 'ignore' }).status === 0;
+  check('Keychain: password', havePw ? OK : BAD, havePw ? 'stored' : 'missing', 'run: cluster setup');
+  check('Keychain: TOTP seed', haveSeed ? OK : BAD, haveSeed ? 'stored' : 'missing', 'run: cluster setup');
+
+  // Clock drift silently invalidates every TOTP code, and the failure looks
+  // exactly like a wrong password.
+  const sntp = spawnSync('sntp', ['time.apple.com'], { encoding: 'utf8', timeout: 8000 });
+  const off = /([+-]?\d+\.\d+)\s*\+\/-/.exec(sntp.stdout || '');
+  const drift = off ? Math.abs(Number(off[1])) : null;
+  check('clock drift', drift === null ? WARN : drift < 5 ? OK : BAD,
+    drift === null ? 'could not check' : `${drift.toFixed(2)}s`,
+    'System Settings → General → Date & Time → set automatically');
+
+  if (haveSeed) {
+    try {
+      const code = totp(keychainGet(KEYCHAIN_TOTP));
+      check('2FA code', OK, `${code} (${totpSecondsRemaining()}s left) — must match your OpenAuth app`);
+    } catch (e) {
+      check('2FA code', BAD, e.message, 'reseed with: cluster setup');
+    }
+  }
+
+  const alive = masterAlive(cfg);
+  check('cluster session', alive ? OK : WARN, alive ? 'up' : 'not connected',
+    'run: cluster login  (then re-run doctor for the remote checks)');
+
+  // --- remote (only when a session already exists; never authenticate here) ---
+  if (alive) {
+    const remote = (cmd) => (spawnSync('ssh', [cfg.clusterHost, cmd], { encoding: 'utf8', timeout: 25000 }).stdout || '').trim();
+    const who = remote('whoami');
+    check('cluster login', who ? OK : BAD, who || 'no response');
+    const mod = remote(`module avail ${cfg.comsolModule} 2>&1 | grep -c ${cfg.comsolModule} || true`);
+    check(`COMSOL module (${cfg.comsolModule})`, Number(mod) > 0 ? OK : BAD,
+      Number(mod) > 0 ? 'available' : 'not found',
+      'check `module avail comsol` and set comsolModule in ~/.config/clt/config.json');
+    const home = remote("df -h $HOME 2>/dev/null | tail -1 | awk '{print $5\" used of \"$2}'");
+    const pctUsed = Number((home.match(/(\d+)%/) || [])[1] || 0);
+    check('home space', pctUsed > 90 ? BAD : pctUsed > 75 ? WARN : OK, home || 'unknown',
+      'delete old job dirs: cluster shell, then rm -rf ~/comsol_jobs/<old>');
+    const q = remote('squeue --me -h | wc -l');
+    check('your queue', OK, `${q.trim()} job(s)`);
+  }
+
+  // --- optional extras ---
+  const opt = (label, present, detail, fix) => check(label, present ? OK : WARN, detail, fix);
+  opt('Windows host config', /^Host\s+.*\b/m.test(text) && new RegExp(`\\b${cfg.windowsHost}\\b`).test(text),
+    cfg.windowsHost, 'only needed to pull .mph files from the Windows PC (README step 5)');
+  opt('figlet', spawnSync('which', ['figlet'], { stdio: 'ignore' }).status === 0,
+    'big headers', 'brew install figlet');
+  opt('Touch ID helper', fs.existsSync(path.join(__dirname, 'touchid')),
+    'gates job submission', 'swiftc -O touchid.swift -o touchid');
+  opt('MCP deps', fs.existsSync(path.join(__dirname, 'node_modules')),
+    'for the AI tools', 'npm install');
+
+  const verdict = bad ? bannerText('problems', ramp(0)) : warn ? bannerText('ok', ramp(0.6)) : bannerText('healthy', ramp(1));
+  page([verdict, '', ...out, '',
+    bad ? `  \x1b[2m${bad} blocking problem(s)${warn ? `, ${warn} warning(s)` : ''} — fix the ✗ lines above\x1b[0m`
+        : warn ? `  \x1b[2m${warn} warning(s); nothing blocking\x1b[0m`
+               : '  \x1b[2measy — everything checks out\x1b[0m'].join('\n'));
+}
+
 // ---------- pipeline steps ----------
 
 async function stageInputFile(cfg, fileArg) {
@@ -1270,6 +1443,8 @@ function usage() {
   cluster login                      just establish the shared ssh session
   cluster logout                     close the shared ssh session now
   cluster code                       print the current 2FA code (for manual logins)
+  cluster seats [--all]              COMSOL licence seats in use across SEAS (--refresh)
+  cluster doctor                     check every setup step and name what is broken
   cluster setup                      interactive first-time / reconfiguration`);
   process.exit(0);
 }
@@ -1278,6 +1453,7 @@ async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
   if (!cmd || ['help', '-h', '--help'].includes(cmd)) usage();
   if (cmd === 'setup') return setup();
+  if (cmd === 'doctor') return doctor();
   if (cmd === 'code') {
     console.log(`${totp(keychainGet(KEYCHAIN_TOTP))}  (${totpSecondsRemaining()}s left)`);
     return;
@@ -1287,6 +1463,8 @@ async function main() {
   switch (cmd) {
     case 'time':   return timeProbe(cfg, rest);
     case 'jobs':   return jobsList(cfg, rest);
+    case 'licenses':
+    case 'seats':  return licenses(cfg, rest);
     case 'status': return rest.includes('--json') ? statusJson(cfg) : status(cfg, rest[0]);
     case 'logs':   return logs(cfg, rest[0]);
     case 'watch': {
@@ -1317,7 +1495,7 @@ module.exports = {
   run, keychainGet, totp, totpSecondsRemaining,
   masterAlive, ensureMaster, touchIdGate,
   stageInputFile, sbatchScript, submit, timeProbe,
-  jobsList, status, statusJson, logs, fetch, frames, cancel, shell, logout,
+  doctor, licenses, jobsList, status, statusJson, logs, fetch, frames, cancel, shell, logout,
   fairshare, fairshareLabs,
   slurmSeconds, slurmTime, recommendMem, etaParts, easternFinish, fmtDur,
   banner, bannerText, ramp, rampLegend,
