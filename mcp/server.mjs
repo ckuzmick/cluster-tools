@@ -171,7 +171,7 @@ server.tool(
 
 server.tool(
   'job_status',
-  'State of one job (with progress % and ETA when running) or, with no job_id, all active jobs plus recent submissions.',
+  'State of one job or, with no job_id, all active jobs plus recent submissions. For a running job: stage_pct is progress within the current geometry/mesh/solve stage and solves_done counts completed solver blocks (real advancement through a sweep). progress_pct and eta are null when multi_stage is true, because COMSOL restarts its progress meter for every stage — do not present stage_pct as whole-job progress.',
   { job_id: z.string().optional() },
   wrap(async ({ job_id }) => {
     if (!job_id) {
@@ -184,16 +184,41 @@ server.tool(
       let progress_pct = null;
       let eta = null;
       const rec = lib.loadJobs().find((j) => j.id === job_id);
+      let stage_pct = null;
+      let solves_done = null;
+      let multi_stage = false;
       if (rec && state === 'RUNNING') {
-        const pct = Number(lib.run('ssh', [cfg.clusterHost,
-          `grep -o "Current Progress: *[0-9]*" ${rec.dir}/batch.log 2>/dev/null | tail -1 | grep -o "[0-9]*$" || true`]).trim());
-        if (pct) {
-          progress_pct = pct;
-          const e = lib.etaParts(pct, lib.slurmSeconds(elapsed));
-          if (e) eta = { remaining_s: Math.round(e.remaining), finish_eastern: e.finish };
+        // COMSOL's progress meter restarts for every geometry build, mesh and
+        // solve, so the last value is stage progress, not job progress. Detect a
+        // restart and report honestly rather than inventing an overall figure.
+        const probe = lib.run('ssh', [cfg.clusterHost,
+          `awk '/Current Progress:/ { if (match($0, /Current Progress: *[0-9]+/)) { ` +
+          `p = substr($0, RSTART, RLENGTH); gsub(/[^0-9]/, "", p); ` +
+          `if (p + 0 < last - 20) reset = 1; last = p + 0 } } ` +
+          `/^-{3,}.*[Ss]olver.*in .*-{3,}>[[:space:]]*$/ { solves++ } ` +
+          `END { print last + 0, reset + 0, solves + 0 }' ${rec.dir}/batch.log 2>/dev/null || true`]).trim();
+        const [p, reset, solves] = probe.split(/\s+/).map(Number);
+        if (Number.isFinite(p)) {
+          stage_pct = p;
+          solves_done = solves;
+          multi_stage = Boolean(reset);
+          if (!reset) {
+            // Single monotonic meter: it really is whole-job progress.
+            progress_pct = p;
+            const e = lib.etaParts(p, lib.slurmSeconds(elapsed));
+            if (e) eta = { remaining_s: Math.round(e.remaining), finish_eastern: e.finish };
+          }
         }
       }
-      return { job_id, state, elapsed, progress_pct, eta, finished: false };
+      return {
+        job_id, state, elapsed,
+        progress_pct,            // null when the log has no single overall meter
+        stage_pct,               // progress within the current geometry/mesh/solve
+        solves_done,             // completed solver blocks — real advancement
+        multi_stage,             // true => progress_pct/eta are deliberately null
+        eta,
+        finished: false,
+      };
     }
     const final = lib.run('ssh', [cfg.clusterHost, `sacct -n -X -j ${job_id} -o State,Elapsed`]).trim().split(/\s+/);
     return { job_id, state: final[0] || 'UNKNOWN', elapsed: final[1] || null, finished: true };

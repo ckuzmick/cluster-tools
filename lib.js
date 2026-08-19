@@ -463,7 +463,7 @@ async function status(cfg, jobid) {
       `awk '/Current Progress:/ { if (match($0, /Current Progress: *[0-9]+/)) { ` +
       `p = substr($0, RSTART, RLENGTH); gsub(/[^0-9]/, "", p) + 0; ` +
       `if (p + 0 < last - 20) reset = 1; last = p + 0 } } ` +
-      `/^-{3,}.*[Ss]olver.*in .*-{3,}>[ \\t]*$/ { solves++ } ` +
+      `/^-{3,}.*[Ss]olver.*in .*-{3,}>[[:space:]]*$/ { solves++ } ` +
       `END { print last + 0, reset + 0, solves + 0 }' ${job.dir}/batch.log 2>/dev/null || true`]).trim();
     const [pct, reset, solves] = probe.split(/\s+/).map(Number);
     if (!Number.isFinite(pct)) continue;
