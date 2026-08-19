@@ -46,9 +46,9 @@ function die(msg) {
 
 // Big friendly status words. Green by default; falls back to plain text
 // when figlet isn't installed (brew install figlet).
-function bannerText(text, color = '32') {
+function bannerText(text, color = '32', font = 'standard') {
   const width = String(process.stdout.columns || 120);
-  const r = spawnSync('figlet', ['-f', 'standard', '-w', width, text], { encoding: 'utf8' });
+  const r = spawnSync('figlet', ['-f', font, '-w', width, text], { encoding: 'utf8' });
   const art = r.status === 0 ? r.stdout.replace(/\s+$/, '') : text;
   return `\x1b[1;${color}m${art}\x1b[0m`;
 }
@@ -490,6 +490,24 @@ async function status(cfg, jobid) {
     return;
   }
   const out = run('ssh', [cfg.clusterHost, `squeue --me -o "%.10i %.18j %.9P %.8T %.10M %.9l %.5C %R"`]);
+
+  // Headline: the one number worth reading across the room. For a single job
+  // that is its elapsed time, coloured by how much of the wall-time limit it has
+  // eaten — jobs killed at the limit are a real and avoidable way to lose work.
+  const rows = out.trim().split('\n').slice(1).map((l) => l.trim().split(/\s+/));
+  const live = rows.filter((r) => r[3] === 'RUNNING');
+  if (rows.length === 0) {
+    banner('idle', DIM);
+  } else if (rows.length === 1 && live.length === 1) {
+    const [, name, , , elapsed, limit] = rows[0];
+    const used = slurmSeconds(limit) ? slurmSeconds(elapsed) / slurmSeconds(limit) : 0;
+    banner(elapsed, ramp(1 - Math.min(1, used)));
+    const pctLimit = Math.round(100 * used);
+    console.log(`\x1b[2m${name} · ${pctLimit}% of the ${limit} limit\x1b[0m\n`);
+  } else {
+    banner(live.length ? `${live.length} running` : `${rows.length} queued`, live.length ? GREEN : YELLOW);
+    console.log('');
+  }
   process.stdout.write(out);
 
   // ETA lines for running jobs this tool submitted (progress comes from batch.log).
@@ -596,7 +614,8 @@ async function watch(cfg, ref, points) {
 
   const rows = () => process.stdout.rows || 24;
   const cols = () => process.stdout.columns || 80;
-  const bodyHeight = () => Math.max(1, rows() - 4); // 3 header lines + 1 footer
+  let headLines = 3;                       // grows when the finish banner shows
+  const bodyHeight = () => Math.max(1, rows() - headLines - 1);
   const maxScroll = () => Math.max(0, tailLines.length - bodyHeight());
 
   const tail = spawn('ssh', [cfg.clusterHost, `tail -n 1000 -F ${job.dir}/batch.log 2>/dev/null`]);
@@ -632,7 +651,6 @@ async function watch(cfg, ref, points) {
   });
 
   function render() {
-    const H = bodyHeight();
     const C = cols();
     const barWidth = Math.max(10, Math.min(C - 24, 50));
     const jobElapsed = jobElapsedBase !== null
@@ -663,12 +681,30 @@ async function watch(cfg, ref, points) {
     const filledB = Math.round((barWidth * barPct) / 100);
     const bar2 = '█'.repeat(filledB) + '░'.repeat(barWidth - filledB);
     const etaStr = eta ? ` \x1b[2m·  ~${fmtDur(eta.remaining * 1000)} left  ·  done ~${eta.finish}\x1b[0m` : '';
-    const head = [
-      ` ${job.name}  ·  job ${job.id}  ·  ${state}  ·  ${fmtDur(jobElapsed !== null ? jobElapsed * 1000 : Date.now() - started)}${mem ? `  ·  ${mem}` : ''}`,
-      (` \x1b[32m${bar2}\x1b[0m ${String(barPct).padStart(3)}%  ${barNote}` + etaStr)
-        .slice(0, C + 9 + (etaStr ? 8 : 0) + (barNote.includes('\x1b') ? 8 : 0)),
-      ` \x1b[2m${'─'.repeat(C - 2)}\x1b[0m`,
-    ];
+    const summary = ` ${job.name}  ·  job ${job.id}  ·  ${state}  ·  `
+      + `${fmtDur(jobElapsed !== null ? jobElapsed * 1000 : Date.now() - started)}${mem ? `  ·  ${mem}` : ''}`;
+    const rule = ` \x1b[2m${'─'.repeat(C - 2)}\x1b[0m`;
+    let head;
+    if (finished) {
+      // The run is over: the progress bar is meaningless now, so give the
+      // verdict the space instead — readable from across the room.
+      const good = finished === 'COMPLETED';
+      const word = good ? 'done' : finished.replace(/\+$/, '').toLowerCase();
+      head = [
+        ...bannerText(word, good ? GREEN : RED, 'small').split('\n').map((l) => ' ' + l),
+        summary,
+        rule,
+      ];
+    } else {
+      head = [
+        summary,
+        (` \x1b[32m${bar2}\x1b[0m ${String(barPct).padStart(3)}%  ${barNote}` + etaStr)
+          .slice(0, C + 9 + (etaStr ? 8 : 0) + (barNote.includes('\x1b') ? 8 : 0)),
+        rule,
+      ];
+    }
+    headLines = head.length;
+    const H = bodyHeight();
     const start = Math.max(0, tailLines.length - H - scroll);
     const body = tailLines.slice(start, start + H).map((l) => `\x1b[2m ${l.slice(0, C - 2)}\x1b[0m`);
     while (body.length < H) body.push('');
