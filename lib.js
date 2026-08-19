@@ -691,7 +691,7 @@ async function watch(cfg, ref, points) {
       const good = finished === 'COMPLETED';
       const word = good ? 'done' : finished.replace(/\+$/, '').toLowerCase();
       head = [
-        ...bannerText(word, good ? GREEN : RED, 'small').split('\n').map((l) => ' ' + l),
+        ...bannerText(word, good ? GREEN : RED).split('\n').map((l) => ' ' + l),
         summary,
         rule,
       ];
