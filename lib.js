@@ -914,17 +914,51 @@ function colorSpans(line, spans) {
 
 const GREEN = '32', YELLOW = '33', RED = '31', DIM = '2', BOLD = '1';
 
-function usageColor(fraction) {
-  if (fraction === 0) return DIM;
-  if (fraction < 0.02) return GREEN;
-  if (fraction < 0.2) return YELLOW;
-  return RED;
+// Continuous red→green ramp. Colour functions return the SGR *parameters*
+// (not a full escape) so they still compose with `\x1b[1;${code}m` and colorSpans.
+const TRUECOLOR = /^(truecolor|24bit)$/i.test(process.env.COLORTERM || '');
+const CUBE = [0, 95, 135, 175, 215, 255]; // xterm-256 colour-cube levels
+
+function rgbCode(r, g, b) {
+  if (TRUECOLOR) return `38;2;${r};${g};${b}`;
+  const q = (v) => CUBE.reduce((best, lvl, i) => (Math.abs(lvl - v) < Math.abs(CUBE[best] - v) ? i : best), 0);
+  return `38;5;${16 + 36 * q(r) + 6 * q(g) + q(b)}`;
 }
 
+// Anchors from the status palette: critical → serious → warning → lime → good.
+const RAMP = [[208, 59, 59], [236, 131, 90], [250, 178, 25], [154, 180, 20], [12, 163, 12]];
+
+/** t = 0 → red, 1 → green. */
+function ramp(t) {
+  const x = Math.max(0, Math.min(1, t)) * (RAMP.length - 1);
+  const i = Math.min(Math.floor(x), RAMP.length - 2);
+  const f = x - i;
+  const [r, g, b] = [0, 1, 2].map((k) => Math.round(RAMP[i][k] + f * (RAMP[i + 1][k] - RAMP[i][k])));
+  return rgbCode(r, g, b);
+}
+
+/**
+ * Usage colour, scaled against an EQUAL SHARE of the lab rather than an
+ * arbitrary cutoff: at 1× your equal slice you sit mid-ramp, at 2× or more
+ * you are full red. Usage is heavily skewed, so absolute thresholds would
+ * paint almost everyone the same colour and say nothing.
+ */
+function usageColor(fraction, members = 8) {
+  if (!fraction) return DIM;
+  const ratio = fraction * Math.max(1, members); // 1.0 == exactly an equal share
+  return ramp(1 - Math.min(1, ratio / 2));
+}
+
+/** Slurm fairshare: 0.5 is neutral by definition, so the ramp maps straight on. */
 function fairshareColor(score) {
-  if (score >= 0.6) return GREEN;
-  if (score >= 0.45) return YELLOW;
-  return RED;
+  return ramp(score);
+}
+
+/** A little colour key: gradient blocks with end labels. */
+function rampLegend(left, right, steps = 12) {
+  const bar = Array.from({ length: steps }, (_, i) =>
+    `\x1b[${ramp(i / (steps - 1))}m█\x1b[0m`).join('');
+  return `\x1b[2m${left}\x1b[0m ${bar} \x1b[2m${right}\x1b[0m`;
 }
 
 async function fairshare(cfg, labArg) {
@@ -992,7 +1026,8 @@ async function fairshare(cfg, labArg) {
   ranked.forEach((m, i) => {
     const spans = [];
     if (!Number.isNaN(m.usage) && labTotal > 0) {
-      spans.push({ start: m.toks[4].start, end: m.toks[4].end, code: usageColor(m.usage / labTotal) });
+      spans.push({ start: m.toks[4].start, end: m.toks[4].end,
+        code: usageColor(m.usage / labTotal, ranked.length) });
     }
     const score = Number(m.words[6]);
     if (!Number.isNaN(score)) {
@@ -1011,9 +1046,9 @@ async function fairshare(cfg, labArg) {
 
   view.push(
     '',
-    `RawUsage — share of lab total: \x1b[32m<2%\x1b[0m  \x1b[33m2–20%\x1b[0m  \x1b[31m>20%\x1b[0m` +
-    `   FairShare: \x1b[32m≥0.6 healthy\x1b[0m  \x1b[33m0.45–0.6\x1b[0m  \x1b[31m<0.45 over budget\x1b[0m`,
-    'Usage decays with a 3-day half-life; jobs bill allocated CPUs + memory (~1 core per 4 GB).'
+    `RawUsage vs an equal share of the lab   ${rampLegend('none', '2\u00d7 or more')}`,
+    `FairShare (0.5 = neutral)               ${rampLegend('0 over budget', '1 idle')}`,
+    '\x1b[2mUsage decays with a 3-day half-life; jobs bill allocated CPUs + memory (~1 core per 4 GB).\x1b[0m'
   );
   page(view.join('\n'));
 }
@@ -1058,8 +1093,8 @@ async function fairshareLabs(cfg, topN) {
     view.push(fmtRow(myRank + 1, labs[myRank]));
   }
 
-  view.push('', `\x1b[2m${labs.length} lab accounts, ranked by decayed usage. fairshare = 2^(−%used/%grant):\x1b[0m ` +
-    `\x1b[32m≥0.6 healthy\x1b[0m  \x1b[33m0.45–0.6\x1b[0m  \x1b[31m<0.45 over budget\x1b[0m`);
+  view.push('', `\x1b[2m${labs.length} lab accounts, ranked by decayed usage. fairshare = 2^(\u2212%used/%grant)\x1b[0m`,
+    `   ${rampLegend('0 over budget', '1 idle')}`);
   page(view.join('\n'));
 }
 
@@ -1192,7 +1227,7 @@ module.exports = {
   status, statusJson, logs, fetch, frames, cancel, shell, logout,
   fairshare, fairshareLabs,
   slurmSeconds, slurmTime, recommendMem, etaParts, easternFinish, fmtDur,
-  banner, bannerText,
+  banner, bannerText, ramp, rampLegend,
 };
 
 if (require.main === module) cli();
