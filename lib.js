@@ -954,11 +954,17 @@ function fairshareColor(score) {
   return ramp(score);
 }
 
-/** A little colour key: gradient blocks with end labels. */
-function rampLegend(left, right, steps = 12) {
-  const bar = Array.from({ length: steps }, (_, i) =>
-    `\x1b[${ramp(i / (steps - 1))}m█\x1b[0m`).join('');
-  return `\x1b[2m${left}\x1b[0m ${bar} \x1b[2m${right}\x1b[0m`;
+/**
+ * Colour key: gradient blocks with end labels. `reverse` draws green→red, for
+ * scales where LOW is good (usage) as opposed to high (fairshare). Drawing both
+ * keys in the same direction would mislabel one of them.
+ */
+function rampLegend(left, right, { reverse = false, steps = 12 } = {}) {
+  const bar = Array.from({ length: steps }, (_, i) => {
+    const t = i / (steps - 1);
+    return `\x1b[${ramp(reverse ? 1 - t : t)}m█\x1b[0m`;
+  }).join('');
+  return `\x1b[2m${left.padStart(13)}\x1b[0m ${bar} \x1b[2m${right}\x1b[0m`;
 }
 
 async function fairshare(cfg, labArg) {
@@ -1046,8 +1052,8 @@ async function fairshare(cfg, labArg) {
 
   view.push(
     '',
-    `RawUsage vs an equal share of the lab   ${rampLegend('none', '2\u00d7 or more')}`,
-    `FairShare (0.5 = neutral)               ${rampLegend('0 over budget', '1 idle')}`,
+    `RawUsage  vs an equal share of the lab  ${rampLegend('none', '2\u00d7 or more', { reverse: true })}`,
+    `FairShare 0.5 = neutral                 ${rampLegend('0 over budget', '1 idle')}`,
     '\x1b[2mUsage decays with a 3-day half-life; jobs bill allocated CPUs + memory (~1 core per 4 GB).\x1b[0m'
   );
   page(view.join('\n'));
