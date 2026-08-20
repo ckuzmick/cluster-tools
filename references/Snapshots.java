@@ -13,6 +13,11 @@ import com.comsol.model.util.*;
  * This file is a runnable demo AND the source of the reusable block below —
  * copy the "SNAPSHOT HELPERS" section into any generated model.
  *
+ * REQUIRES `comsol batch -3drend sw`. Compute nodes have no GPU, and with the
+ * default OpenGL renderer every export below writes nothing while still
+ * reporting success — a silent failure that costs a whole run. Both the CLI
+ * and the MCP server pass this flag; keep it if you hand-roll a batch line.
+ *
  * Every property is set through put(), which reports a rejected property name
  * instead of aborting the run, so an API mismatch costs one log line rather
  * than a whole cluster job. Frames are best-effort: never let imaging break

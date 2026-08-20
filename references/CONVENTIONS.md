@@ -60,6 +60,9 @@ different prerequisites:
   both look there, and the numeric prefix defines playback order.
 - Set every image property through a tolerant helper that logs a rejected property
   name and carries on. Imaging must never be able to fail a solve.
+- **`comsol batch` must be given `-3drend sw`.** Compute nodes have no GPU; with
+  the default OpenGL renderer image exports silently write nothing and still
+  report success. The CLI and MCP server both pass it now.
 
 ## Sanity rules before trusting a solve
 - Export geometry + mesh images and look at them.

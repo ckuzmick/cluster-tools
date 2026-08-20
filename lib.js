@@ -720,7 +720,7 @@ function sbatchScript(cfg, name, jobDir, extraArgs, overrides = {}) {
 #SBATCH -o slurm-%j.log
 ${mail}module load ${cfg.comsolModule}
 cd $HOME/${jobDir}
-comsol batch -np $SLURM_CPUS_PER_TASK -inputfile in.mph -outputfile out.mph -batchlog batch.log ${comsolArgs}
+comsol batch -3drend sw -np $SLURM_CPUS_PER_TASK -inputfile in.mph -outputfile out.mph -batchlog batch.log ${comsolArgs}
 `;
 }
 

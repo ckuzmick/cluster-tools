@@ -99,8 +99,10 @@ function codeScript(res, jobDir, className) {
 #SBATCH -o /dev/null
 cd $HOME/${jobDir}
 module load ${cfg.comsolModule}
+# -3drend sw: compute nodes have no GPU, and with the default OpenGL renderer
+# every image().export() writes nothing while still reporting success.
 comsol compile ${className}.java > compile.log 2>&1 || { echo COMPILE_FAILED >> compile.log; exit 1; }
-comsol batch -np $SLURM_CPUS_PER_TASK -inputfile ${className}.class -nosave -batchlog batch.log >> compile.log 2>&1
+comsol batch -3drend sw -np $SLURM_CPUS_PER_TASK -inputfile ${className}.class -nosave -batchlog batch.log >> compile.log 2>&1
 `;
 }
 
