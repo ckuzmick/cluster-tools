@@ -283,6 +283,50 @@ exit [lindex $r 3]
   return true;
 }
 
+/**
+ * Which job does the user mean? With no argument this used to take the newest
+ * RECORD, which is wrong whenever the thing you actually want to watch is the
+ * thing that is running — and a job submitted outside this tool (or lost to a
+ * concurrent write of jobs.json) is not recorded at all.
+ * Order: an explicit match in the records, else whatever is in the queue now,
+ * else the newest record. A queued-but-unrecorded job has its directory
+ * recovered from the batch script path Slurm still remembers.
+ */
+async function resolveJob(cfg, ref) {
+  await ensureMaster(cfg);
+  const recorded = loadJobs();
+  if (ref) {
+    const hit = [...recorded].reverse().find((j) => j.id === ref || j.name === ref);
+    if (hit) return hit;
+  }
+
+  let id = ref;
+  if (!id) {
+    const q = run('ssh', [cfg.clusterHost, 'squeue --me -h -o "%i|%T"']).trim();
+    const active = q ? q.split('\n').map((l) => l.trim().split('|')) : [];
+    const pick = active.find(([, st]) => st === 'RUNNING') || active[0];
+    if (pick) id = pick[0];
+  }
+  if (!id) {
+    if (!recorded.length) die('no jobs submitted yet');
+    return recorded[recorded.length - 1];
+  }
+
+  const known = recorded.find((j) => j.id === id);
+  if (known) return known;
+
+  const info = run('ssh', [cfg.clusterHost, `scontrol show job ${id} 2>/dev/null || true`]);
+  const cmd = (/Command=(\S+)/.exec(info) || [])[1];
+  const name = (/JobName=(\S+)/.exec(info) || [])[1] || String(id);
+  const wd = (/WorkDir=(\S+)/.exec(info) || [])[1];
+  const dir = cmd && cmd !== '(null)' ? path.posix.dirname(cmd) : wd;
+  if (!dir) {
+    die(`job ${id} is not in this tool's records and Slurm has no directory for it`
+      + (ref ? '' : ' — name a job: cluster jobs'));
+  }
+  return { id: String(id), name, dir, recovered: true };
+}
+
 // ---------- run reports & accumulated lessons ----------
 // Facts are captured automatically after every run; judgement is recorded
 // explicitly. Both are fed back to the next session so the tool gets better
@@ -310,9 +354,8 @@ function recordLesson({ lesson, category = 'general', jobId = null }) {
 
 /** Everything worth knowing about one finished run, gathered without judgement. */
 async function runReport(cfg, ref) {
-  const job = /^\d+$/.test(ref || '') ? { id: ref, name: ref, dir: null } : findJob(ref);
-  const rec = loadJobs().find((j) => j.id === job.id) || job;
-  await ensureMaster(cfg);
+  const job = await resolveJob(cfg, ref);
+  const rec = job;
 
   const acct = run('ssh', [cfg.clusterHost,
     `sacct -X -n -P -j ${job.id} -o State,Elapsed,ReqCPUS,ReqMem,Partition`]).trim().split('|');
@@ -398,8 +441,7 @@ function lessons() {
 
 /** Parse `seff` into numbers. Fairshare bills what you ASK for, so over-requesting costs real priority. */
 async function effStatus(cfg, ref) {
-  const job = /^\d+$/.test(ref || '') ? { id: ref, name: ref } : findJob(ref);
-  await ensureMaster(cfg);
+  const job = await resolveJob(cfg, ref);
   const raw = run('ssh', [cfg.clusterHost, `seff ${job.id} 2>&1`]);
   const num = (re) => { const m = re.exec(raw); return m ? Number(m[1]) : null; };
   const gb = (re) => {
@@ -1002,16 +1044,14 @@ async function status(cfg, jobid) {
 }
 
 async function logs(cfg, ref) {
-  const job = findJob(ref);
-  await ensureMaster(cfg);
+  const job = await resolveJob(cfg, ref);
   spawnSync('ssh', [cfg.clusterHost,
     `tail -n 50 ${job.dir}/batch.log 2>/dev/null || tail -n 50 ${job.dir}/slurm-${job.id}.log`,
   ], { stdio: 'inherit' });
 }
 
 async function fetch(cfg, ref) {
-  const job = findJob(ref);
-  await ensureMaster(cfg);
+  const job = await resolveJob(cfg, ref);
   const dest = `${job.name}-out.mph`;
   console.log(`fetching ${job.dir}/out.mph → ./${dest}`);
   run('scp', ['-q', `${cfg.clusterHost}:${job.dir}/out.mph`, dest]);
@@ -1042,8 +1082,7 @@ function etaParts(pct, elapsedSec) {
 }
 
 async function watch(cfg, ref, points) {
-  const job = findJob(ref);
-  await ensureMaster(cfg);
+  const job = await resolveJob(cfg, ref);
 
   // Non-interactive output (pipes, logs): just stream the file.
   if (!process.stdout.isTTY || !process.stdin.isTTY) {
@@ -1287,8 +1326,7 @@ async function watch(cfg, ref, points) {
 async function frames(cfg, rest) {
   const embed = rest.includes('--embed');
   const open = rest.includes('--open');
-  const job = findJob(rest.find((a) => !a.startsWith('--')));
-  await ensureMaster(cfg);
+  const job = await resolveJob(cfg, rest.find((a) => !a.startsWith('--')));
 
   const dest = path.join(os.homedir(), 'clt-runs', `${job.name}-${job.id}`);
   const framesDir = path.join(dest, 'frames');
@@ -1377,18 +1415,9 @@ show(0);
 }
 
 async function cancel(cfg, ref) {
-  let id, label;
-  if (ref && /^\d+$/.test(ref)) {
-    id = ref;
-    label = `job ${ref}`;
-  } else {
-    const job = findJob(ref);
-    id = job.id;
-    label = `job ${job.id} (${job.name})`;
-  }
-  await ensureMaster(cfg);
-  run('ssh', [cfg.clusterHost, `scancel ${id}`]);
-  console.log(`cancelled ${label}`);
+  const job = await resolveJob(cfg, ref);
+  run('ssh', [cfg.clusterHost, `scancel ${job.id}`]);
+  console.log(`cancelled job ${job.id} (${job.name})`);
 }
 
 async function shell(cfg) {
@@ -1737,7 +1766,7 @@ function cli() {
 
 module.exports = {
   cli, main,
-  loadConfig, loadJobs, recordJob, findJob,
+  loadConfig, loadJobs, recordJob, findJob, resolveJob,
   run, keychainGet, totp, totpSecondsRemaining,
   masterAlive, ensureMaster, touchIdGate,
   stageInputFile, sbatchScript, submit, timeProbe,
